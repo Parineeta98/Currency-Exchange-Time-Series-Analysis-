@@ -13,11 +13,9 @@ from datetime import datetime
 sns.set(style='whitegrid')
 plt.rcParams['figure.figsize'] = (12,6)
 
-
 os.makedirs('plots', exist_ok=True)
 
-
-# ------------- Parameters (match report) ----------------
+# ------------- Parameters ----------------
 TICKERS = {
 'EURUSD': 'EURUSD=X',
 'GBPJPY': 'GBPJPY=X',
@@ -29,8 +27,6 @@ SCALES = np.arange(1,8) # 1..7
 WAVELET = 'mexh'
 
 # ------------- Helper functions ----------------
-
-
 def download_close(ticker, start, end):
     print(f"Downloading {ticker} from Yahoo Finance...")
     data = yf.download(ticker, start=start, end=end, progress=False)
@@ -41,15 +37,13 @@ def download_close(ticker, start, end):
     return s
 
 def fill_missing(series):
-    # The report replaced missing values by mean of previous and next day.
-    # We'll implement that: replace NaN by (prev + next)/2 where both exist.
+    # Missing values are erplaced by mean of previous and next day: replace NaN by (prev + next)/2 where both exist.
     s = series.copy()
     n = len(s)
     is_na = s.isna()
     na_idx = np.where(is_na)[0]
     for i in na_idx:
         if i==0 or i==n-1:
-            # fallback to forward/backward fill
             continue
         prev = s.iloc[i-1]
         nxt = s.iloc[i+1]
@@ -58,28 +52,19 @@ def fill_missing(series):
     s = s.fillna(method='ffill').fillna(method='bfill')
     return s
 
-# def compute_cwt_layers(series, scales, wavelet):
-#     # pywt.cwt returns (coefficients, frequencies)
-#     data = series.values.ravel()
-#     coeffs, freqs = pywt.cwt(data, scales, wavelet)
-#     # coeffs shape: (len(scales), len(data))
-#     # We'll treat each row as a layer (time series)
-#     layers = pd.DataFrame(coeffs.T, index=series.index, columns=[f'scale_{s}' for s in scales])
-#     return layers, freqs
-
 def compute_cwt_layers(series, scales,wavelet= 'mexh'):
     """
     Decompose the time series using the Continuous Wavelet Transform
-    with the Mexican Hat (Ricker) wavelet, as per the given formula.
+    with the Mexican Hat (Ricker) wavelet.
     """
     data = series.values.ravel()
     data = (data - np.mean(data)) / np.std(data)
-    # --- Step 2: compute CWT ---
+    # compute CWT 
     coeffs, freqs = pywt.cwt(data, scales, wavelet)
-    # --- Step 3: normalize by sqrt(scale) (common for CWT energy scaling) ---
+    # normalize by sqrt(scale) 
     coeffs = coeffs / np.sqrt(scales[:, None])
-    # --- Step 4: trim edges to reduce boundary artifacts ---
-    edge = int(0.02 * len(data))  # trim 2% at each end
+    # trim edges to reduce boundary artifacts: trim 2% at each end
+    edge = int(0.02 * len(data))  
     coeffs = coeffs[:, edge:-edge]
     trimmed_index = series.index[edge:-edge]
     layers = pd.DataFrame(coeffs.T, index=trimmed_index, columns=[f'scale_{s}' for s in scales])
@@ -94,9 +79,7 @@ def compress_sum(layers):
     return high, low
 
 def compress_svd(layers):
-    # Stack 7 layers into matrix (7 x T) and compute SVD (TruncatedSVD)
     M = layers.T.values # shape (7, T)
-    # We'll use numpy SVD directly
     U, s, Vt = np.linalg.svd(M, full_matrices=False)
     # Components: U (7 x 7), s (7,), Vt (7 x T)
     # First right-singular vector times singular value gives principal time-series component
@@ -105,12 +88,9 @@ def compress_svd(layers):
     idx = layers.index
     vol = pd.Series(comp1, index=idx) # interpret comp1 as VOL (dominant slow component)
     white = pd.Series(comp2, index=idx) # interpret comp2 as white-noise (second component)
-    # For clarity scale both to have comparable magnitudes to summation method (optional)
     return white, vol
 
 def fit_and_report(series, name):
-    # Fit linear regression series ~ time_index (as integer)
-    # time index: days since start
     t = (series.index - series.index[0]).days.values.reshape(-1,1)
     y = series.values.reshape(-1,1)
     model = LinearRegression()
@@ -123,52 +103,39 @@ def fit_and_report(series, name):
 
 # ------------- Main pipeline ----------------
 summary_rows = []
-
-
 for name, ticker in TICKERS.items():
     s = download_close(ticker, START, END)
     s = fill_missing(s)
-
-
-    # Trim first and last 20 values (as in report they removed initial and final 20)
+    # Trimming first and last 20 values 
     if len(s) > 50:
         s = s.iloc[20:-20]
 
-
-    # Plot original price
     plt.figure()
     plt.plot(s.index, s.values)
     plt.title(f'{name} Close Price ({START} to {END})')
     plt.xlabel('Date')
     plt.ylabel('Close Price')
     plt.tight_layout()
-    plt.savefig(f'plots/{name}_close.png')
+    plt.savefig(f'plots/{name}_close_price.png')
     plt.close()
 
     layers, freqs = compute_cwt_layers(s, SCALES, WAVELET)
     
-    # 3️⃣ Plot the original series + its 7 decomposed layers
+    # Plot the original series and its 7 decomposed layers
     fig, axes = plt.subplots(8, 1, figsize=(14, 12), sharex=True)
 
-    # Original series on top
     axes[0].plot(s.index, s.values, color='black')
     axes[0].set_title(f'{name} Exchange Rate and 7-Layer CWT Decomposition (Mexican Hat)')
     axes[0].set_ylabel('Price')
 
-        # Each CWT scale layer
     for i, col in enumerate(layers.columns):
         axes[i + 1].plot(layers.index, layers[col].values, color='C0')
         axes[i + 1].set_ylabel(f'{col}')
-        # Reduce clutter: only show y-labels, no grid
         axes[i + 1].grid(False)
-        # Hide x tick labels except for bottom subplot
         if i < len(layers.columns) - 1:
             axes[i + 1].set_xticklabels([])
-    
-    # Label x-axis only on the last subplot
     axes[-1].set_xlabel('Date')
     
-    # Make the layout clean
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     fig.suptitle(f'{name} - Continuous Wavelet Decomposition (7 scales)', fontsize=14, y=0.995)
     plt.savefig(f'plots/{name}_cwt_layers.png')
@@ -176,58 +143,31 @@ for name, ticker in TICKERS.items():
 
     # Compression - Summation
     high_sum, low_sum = compress_sum(layers)
-    # plt.figure()
-    # plt.plot(low_sum.index, low_sum.values, label='Low-frequency (VOL)', color='C1')
-    # plt.plot(high_sum.index, high_sum.values, label='High-frequency (White noise)', color='C0', alpha=0.7)
-    # plt.legend()
-    # plt.title(f'{name} - Summation compression (high vs low)')
-    # plt.savefig(f'plots/{name}_sum_compressed.png')
-    # plt.close()
-    #plot the plots as two seperate plots
     plt.figure()
     plt.plot(low_sum.index, low_sum.values, label='Low-frequency (VOL)', color='C1')
-    plt.title(f'{name} - Summation compression (Low-frequency VOL)')
-    plt.savefig(f'plots/{name}_sum_compressed_low.png')
-    plt.close()
-    plt.figure()
-    plt.plot(high_sum.index, high_sum.values, label='High-frequency (White noise)',
-                color='C0', alpha=0.7)
-    plt.title(f'{name} - Summation compression (High-frequency White noise)')
-    plt.savefig(f'plots/{name}_sum_compressed_high.png')
+    plt.plot(high_sum.index, high_sum.values, label='High-frequency (White noise)', color='C0', alpha=0.7)
+    plt.legend()
+    plt.title(f'{name} - Summation compression (high vs low)')
+    plt.savefig(f'plots/{name}_sum_compressed.png')
     plt.close()
 
     # Compression - SVD
-    # white_svd, vol_svd = compress_svd(layers)
-    # plt.figure()
-    # plt.plot(vol_svd.index, vol_svd.values, label='VOL (SVD comp1)', color='C1')
-    # plt.plot(white_svd.index, white_svd.values, label='White noise (SVD comp2)', color='C0', alpha=0.7)
-    # plt.legend()
-    # plt.title(f'{name} - SVD compression (comp1=VOL, comp2=White)')
-    # plt.savefig(f'plots/{name}_svd_compressed.png')
-    # plt.close()
-    #plot the plots as two seperate plots
     white_svd, vol_svd = compress_svd(layers)
     plt.figure()
     plt.plot(vol_svd.index, vol_svd.values, label='VOL (SVD comp1)', color='C1')
-    plt.title(f'{name} - SVD compression (VOL)')
-    plt.savefig(f'plots/{name}_svd_compressed_vol.png')
-    plt.close()
-    plt.figure()
     plt.plot(white_svd.index, white_svd.values, label='White noise (SVD comp2)', color='C0', alpha=0.7)
-    plt.title(f'{name} - SVD compression (White noise)')
-    plt.savefig(f'plots/{name}_svd_compressed_white.png')
+    plt.legend()
+    plt.title(f'{name} - SVD compression (comp1=VOL, comp2=White)')
+    plt.savefig(f'plots/{name}_svd_compressed.png')
     plt.close()
     
 # Regression on both compressed methods
     # Summation method
     sum_high_res = fit_and_report(high_sum, f'{name}_sum_high')
     sum_low_res = fit_and_report(low_sum, f'{name}_sum_low')
-
-
     # SVD method
     svd_white_res = fit_and_report(white_svd, f'{name}_svd_white')
     svd_vol_res = fit_and_report(vol_svd, f'{name}_svd_vol')
-
 
     # Plot regressions (SVD)
     t = svd_vol_res['t']; y_pred = svd_vol_res['y_pred']
@@ -267,7 +207,7 @@ for name, ticker in TICKERS.items():
     plt.savefig(f'plots/{name}_sum_white_regression.png')
     plt.close()
 
-    # Collect summary
+    # Summary
     summary_rows.append({
         'pair': name,
         'sum_vol_slope': sum_low_res['slope'],
@@ -280,14 +220,11 @@ for name, ticker in TICKERS.items():
         'svd_white_r2': svd_white_res['r2']
     })
 
-# Save summary
+# Saving everything
 summary_df = pd.DataFrame(summary_rows)
 summary_df.to_csv('compression_regression_summary.csv', index=False)
 print('\nSummary saved to compression_regression_summary.csv')
-print(summary_df)
 
-
-# Also save a small table plot
 plt.figure(figsize=(10,2 + 0.5*len(summary_df)))
 plt.axis('off')
 plt.table(cellText=np.round(summary_df.select_dtypes(include=[np.number]), 6).values,
